@@ -37,16 +37,16 @@
   <button id="stopBtn">■ Stop</button>
   <div class="tempo">
     <label>Tempo</label>
-    <input type="range" id="tempo" min="60" max="240" value="180">
-    <span id="tempoVal">180 BPM</span>
+    <input type="range" id="tempo" min="60" max="240" value="240">
+    <span id="tempoVal">240 BPM</span>
   </div>
 </div>
 
 <div class="sheet" id="sheet"></div>
 
 <div class="legend">
-  <span>Sa = B</span><span>Re = C#</span><span>Ga = D</span><span>Ma = E</span>
-  <span>Pa = F#</span><span>Dha = G</span><span>Ni = A</span>
+  <span>Sa = A</span><span>Re = B</span><span>Ga = C</span><span>Ma = D</span>
+  <span>Pa = E</span><span>Dha = F</span><span>Ni = G</span>
 </div>
 
 <script>
@@ -68,13 +68,12 @@ const SWARAM = [
   ["Sa","re","re","ga","ga","ma","ma","pa"],
 ];
 
-// B minor: Sa=B4, Re=C#5, Ga=D5, Ma=E5, Pa=F#5, Dha=G5, Ni=A5
-// ni (lower) = A4
+// A minor: Sa=A4, Re=B4, Ga=C5, Ma=D5, Pa=E5, Dha=F5, Ni=G5
 const FREQ = {
-  sa: 493.88, re: 554.37, ri: 554.37, ga: 587.33,
-  ma: 659.25, pa: 739.99, dha: 783.99, ni: 880.00,
-  Sa: 493.88, Re: 554.37, Ri: 554.37, Ga: 587.33,
-  Ma: 659.25, Pa: 739.99, Dha: 783.99, Ni: 440.00,
+  sa: 440.00, re: 493.88, ri: 493.88, ga: 523.25,
+  ma: 587.33, pa: 659.25, dha: 698.46, ni: 783.99,
+  Sa: 440.00, Re: 493.88, Ri: 493.88, Ga: 523.25,
+  Ma: 587.33, Pa: 659.25, Dha: 698.46, Ni: 392.00,
 };
 
 // Build DOM
@@ -99,25 +98,118 @@ let audioCtx = null;
 let playing = false;
 let stopRequested = false;
 
+function buildAudioGraph() {
+  const ctx = new (window.AudioContext || window.webkitAudioContext)();
+
+  // Concert-hall reverb via synthetic impulse response
+  const convolver = ctx.createConvolver();
+  const rate = ctx.sampleRate;
+  const len = rate * 3.2;
+  const ir = ctx.createBuffer(2, len, rate);
+  for (let c = 0; c < 2; c++) {
+    const d = ir.getChannelData(c);
+    for (let i = 0; i < len; i++)
+      d[i] = (Math.random() * 2 - 1) * Math.pow(1 - i / len, 1.8);
+  }
+  convolver.buffer = ir;
+
+  const reverbGain = ctx.createGain();
+  reverbGain.gain.value = 0.45;
+  convolver.connect(reverbGain);
+
+  const comp = ctx.createDynamicsCompressor();
+  comp.threshold.value = -14;
+  comp.knee.value = 8;
+  comp.ratio.value = 5;
+  comp.attack.value = 0.004;
+  comp.release.value = 0.2;
+  comp.connect(ctx.destination);
+
+  reverbGain.connect(comp);
+  ctx._dry = comp;
+  ctx._wet = convolver;
+  return ctx;
+}
+
 function getCtx() {
-  if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+  if (!audioCtx) audioCtx = buildAudioGraph();
   return audioCtx;
 }
 
-function playTone(freq, duration, ctx) {
-  return new Promise(resolve => {
+function scheduleOrchestraNote(freq, startTime, duration, ctx) {
+  const tail = duration * 2.5;
+
+  // --- Strings layer: 3 detuned sawtooth oscillators + lowpass filter + vibrato ---
+  [-6, 0, 6].forEach((detune, idx) => {
     const osc = ctx.createOscillator();
-    const gain = ctx.createGain();
-    osc.connect(gain);
-    gain.connect(ctx.destination);
-    osc.type = 'triangle';
-    osc.frequency.setValueAtTime(freq, ctx.currentTime);
-    gain.gain.setValueAtTime(0.4, ctx.currentTime);
-    gain.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + duration * 0.9);
-    osc.start(ctx.currentTime);
-    osc.stop(ctx.currentTime + duration);
-    osc.onended = resolve;
+    osc.type = 'sawtooth';
+    osc.frequency.value = freq;
+    osc.detune.value = detune;
+
+    // Vibrato LFO (kicks in after attack)
+    const lfo = ctx.createOscillator();
+    const lfoAmt = ctx.createGain();
+    lfo.frequency.value = 5.2 + idx * 0.3;
+    lfoAmt.gain.setValueAtTime(0, startTime);
+    lfoAmt.gain.linearRampToValueAtTime(10, startTime + 0.12);
+    lfo.connect(lfoAmt);
+    lfoAmt.connect(osc.detune);
+
+    // Warm lowpass filter (remove harshness)
+    const filt = ctx.createBiquadFilter();
+    filt.type = 'lowpass';
+    filt.frequency.value = freq * 5;
+    filt.Q.value = 0.8;
+
+    const g = ctx.createGain();
+    const amp = 0.10;
+    g.gain.setValueAtTime(0, startTime);
+    g.gain.linearRampToValueAtTime(amp, startTime + 0.08);   // slow bow attack
+    g.gain.setValueAtTime(amp, startTime + duration * 0.75);
+    g.gain.exponentialRampToValueAtTime(0.0001, startTime + tail);
+
+    osc.connect(filt); filt.connect(g);
+    g.connect(ctx._dry);
+    g.connect(ctx._wet);
+
+    lfo.start(startTime); lfo.stop(startTime + tail);
+    osc.start(startTime); osc.stop(startTime + tail + 0.05);
   });
+
+  // --- Brass/horn layer: filtered square wave, medium attack ---
+  const brass = ctx.createOscillator();
+  brass.type = 'square';
+  brass.frequency.value = freq;
+  const brassF = ctx.createBiquadFilter();
+  brassF.type = 'lowpass';
+  brassF.frequency.value = freq * 3;
+  brassF.Q.value = 1.2;
+  const brassG = ctx.createGain();
+  brassG.gain.setValueAtTime(0, startTime);
+  brassG.gain.linearRampToValueAtTime(0.06, startTime + 0.12);
+  brassG.gain.setValueAtTime(0.06, startTime + duration * 0.6);
+  brassG.gain.exponentialRampToValueAtTime(0.0001, startTime + tail * 0.8);
+  brass.connect(brassF); brassF.connect(brassG);
+  brassG.connect(ctx._dry);
+  brassG.connect(ctx._wet);
+  brass.start(startTime); brass.stop(startTime + tail);
+
+  // --- Cello/bass doubling at octave below (adds body) ---
+  const cello = ctx.createOscillator();
+  cello.type = 'sawtooth';
+  cello.frequency.value = freq / 2;
+  const celloF = ctx.createBiquadFilter();
+  celloF.type = 'lowpass';
+  celloF.frequency.value = freq * 2;
+  const celloG = ctx.createGain();
+  celloG.gain.setValueAtTime(0, startTime);
+  celloG.gain.linearRampToValueAtTime(0.07, startTime + 0.1);
+  celloG.gain.setValueAtTime(0.07, startTime + duration * 0.7);
+  celloG.gain.exponentialRampToValueAtTime(0.0001, startTime + tail);
+  cello.connect(celloF); celloF.connect(celloG);
+  celloG.connect(ctx._dry);
+  celloG.connect(ctx._wet);
+  cello.start(startTime); cello.stop(startTime + tail);
 }
 
 function clearHighlights() {
@@ -127,29 +219,39 @@ function clearHighlights() {
   });
 }
 
-async function playSong() {
+function playSong() {
   if (playing) return;
   playing = true;
   stopRequested = false;
   document.getElementById('playBtn').disabled = true;
-  const ctx = getCtx();
 
+  const ctx = getCtx();
   const bpm = parseInt(document.getElementById('tempo').value);
   const noteDur = 60 / bpm;
+  const startTime = ctx.currentTime + 0.1;
 
-  for (const { el, lineEl, freq } of noteEls) {
-    if (stopRequested) break;
+  noteEls.forEach(({ freq }, i) => {
+    scheduleOrchestraNote(freq, startTime + i * noteDur, noteDur, ctx);
+  });
+
+  noteEls.forEach(({ el, lineEl }, i) => {
+    const delay = (startTime - ctx.currentTime + i * noteDur) * 1000;
+    setTimeout(() => {
+      if (stopRequested) return;
+      clearHighlights();
+      el.classList.add('playing');
+      lineEl.classList.add('active');
+      el.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+    }, delay);
+  });
+
+  const totalMs = (startTime - ctx.currentTime + noteEls.length * noteDur) * 1000;
+  setTimeout(() => {
     clearHighlights();
-    el.classList.add('playing');
-    lineEl.classList.add('active');
-    el.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
-    await playTone(freq, noteDur, ctx);
-  }
-
-  clearHighlights();
-  playing = false;
-  stopRequested = false;
-  document.getElementById('playBtn').disabled = false;
+    playing = false;
+    stopRequested = false;
+    document.getElementById('playBtn').disabled = false;
+  }, totalMs + 800);
 }
 
 document.getElementById('playBtn').addEventListener('click', playSong);
