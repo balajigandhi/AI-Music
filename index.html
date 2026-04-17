@@ -1,0 +1,168 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Deewana Deewana</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { background: #1a1a2e; color: #eee; font-family: 'Georgia', serif; min-height: 100vh; display: flex; flex-direction: column; align-items: center; padding: 40px 20px; }
+  h1 { font-size: 2.2rem; letter-spacing: 4px; margin-bottom: 6px; color: #f0c060; }
+  .subtitle { font-size: 0.9rem; color: #888; margin-bottom: 40px; letter-spacing: 2px; }
+  .controls { display: flex; gap: 12px; margin-bottom: 40px; flex-wrap: wrap; justify-content: center; }
+  button { padding: 10px 28px; border: none; border-radius: 24px; font-size: 1rem; cursor: pointer; transition: all 0.2s; }
+  #playBtn { background: #f0c060; color: #1a1a2e; font-weight: bold; }
+  #playBtn:hover { background: #ffd080; }
+  #playBtn:disabled { background: #555; color: #888; cursor: default; }
+  #stopBtn { background: transparent; border: 2px solid #f0c060; color: #f0c060; }
+  #stopBtn:hover { background: rgba(240,192,96,0.15); }
+  .tempo { display: flex; align-items: center; gap: 10px; color: #aaa; font-size: 0.85rem; }
+  input[type=range] { accent-color: #f0c060; width: 100px; }
+  .sheet { width: 100%; max-width: 700px; }
+  .line { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 14px; padding: 10px 16px; background: rgba(255,255,255,0.04); border-radius: 10px; border-left: 3px solid transparent; transition: border-color 0.3s; }
+  .line.active { border-left-color: #f0c060; background: rgba(240,192,96,0.08); }
+  .note { padding: 4px 10px; border-radius: 16px; font-size: 1rem; transition: all 0.15s; cursor: default; }
+  .note.playing { background: #f0c060; color: #1a1a2e; font-weight: bold; transform: scale(1.15); }
+  .legend { margin-top: 40px; display: flex; flex-wrap: wrap; gap: 8px; justify-content: center; font-size: 0.78rem; color: #888; }
+  .legend span { background: rgba(255,255,255,0.06); padding: 3px 10px; border-radius: 10px; }
+</style>
+</head>
+<body>
+
+<h1>DEEWANA DEEWANA</h1>
+<div class="subtitle">Indian Swaram Notation · B Minor</div>
+
+<div class="controls">
+  <button id="playBtn">▶ Play</button>
+  <button id="stopBtn">■ Stop</button>
+  <div class="tempo">
+    <label>Tempo</label>
+    <input type="range" id="tempo" min="60" max="240" value="180">
+    <span id="tempoVal">180 BPM</span>
+  </div>
+</div>
+
+<div class="sheet" id="sheet"></div>
+
+<div class="legend">
+  <span>Sa = B</span><span>Re = C#</span><span>Ga = D</span><span>Ma = E</span>
+  <span>Pa = F#</span><span>Dha = G</span><span>Ni = A</span>
+</div>
+
+<script>
+const SWARAM = [
+  ["Ga","ma","pa","ga","re","sa"],
+  ["Ga","ma","pa","ga","re","sa"],
+  ["Sa","ri","ri","ri","ri","ni"],
+  ["Dha","ni","dha","dha","ni","dha","pa","dha","ma"],
+  ["Ga","ma","pa","ga","re","sa"],
+  ["Ga","ma","pa","ga","re","sa"],
+  ["Sa","ni","ni","ni","ni","ni"],
+  ["Dha","ni","dha","dha","ni","dha","pa","ma"],
+  ["Ma","dha","pa","sa","pa","dha","pa","sa"],
+  ["Pa","ga","pa","ma","re","ma","ga"],
+  ["Sa","re","re","ga","ga","ma","ma","pa","dha","pa","ma","ga","re"],
+  ["Sa","re","re","ga","ga","ma","ma","pa","dha","pa","ma","ga","re"],
+  ["Sa","re","re","ga","ga","ma","ma","pa"],
+  ["Sa","re","re","ga","ga","ma","ma","pa"],
+  ["Sa","re","re","ga","ga","ma","ma","pa"],
+];
+
+// B minor: Sa=B4, Re=C#5, Ga=D5, Ma=E5, Pa=F#5, Dha=G5, Ni=A5
+// ni (lower) = A4
+const FREQ = {
+  sa: 493.88, re: 554.37, ri: 554.37, ga: 587.33,
+  ma: 659.25, pa: 739.99, dha: 783.99, ni: 880.00,
+  Sa: 493.88, Re: 554.37, Ri: 554.37, Ga: 587.33,
+  Ma: 659.25, Pa: 739.99, Dha: 783.99, Ni: 440.00,
+};
+
+// Build DOM
+const sheet = document.getElementById('sheet');
+const noteEls = [];
+SWARAM.forEach((line, li) => {
+  const div = document.createElement('div');
+  div.className = 'line';
+  div.id = 'line-' + li;
+  line.forEach((n, ni) => {
+    const span = document.createElement('span');
+    span.className = 'note';
+    span.id = `n-${li}-${ni}`;
+    span.textContent = n;
+    div.appendChild(span);
+    noteEls.push({ el: span, lineEl: div, freq: FREQ[n] || 493.88 });
+  });
+  sheet.appendChild(div);
+});
+
+let audioCtx = null;
+let playing = false;
+let stopRequested = false;
+
+function getCtx() {
+  if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+  return audioCtx;
+}
+
+function playTone(freq, duration, ctx) {
+  return new Promise(resolve => {
+    const osc = ctx.createOscillator();
+    const gain = ctx.createGain();
+    osc.connect(gain);
+    gain.connect(ctx.destination);
+    osc.type = 'triangle';
+    osc.frequency.setValueAtTime(freq, ctx.currentTime);
+    gain.gain.setValueAtTime(0.4, ctx.currentTime);
+    gain.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + duration * 0.9);
+    osc.start(ctx.currentTime);
+    osc.stop(ctx.currentTime + duration);
+    osc.onended = resolve;
+  });
+}
+
+function clearHighlights() {
+  noteEls.forEach(({ el, lineEl }) => {
+    el.classList.remove('playing');
+    lineEl.classList.remove('active');
+  });
+}
+
+async function playSong() {
+  if (playing) return;
+  playing = true;
+  stopRequested = false;
+  document.getElementById('playBtn').disabled = true;
+  const ctx = getCtx();
+
+  const bpm = parseInt(document.getElementById('tempo').value);
+  const noteDur = 60 / bpm;
+
+  for (const { el, lineEl, freq } of noteEls) {
+    if (stopRequested) break;
+    clearHighlights();
+    el.classList.add('playing');
+    lineEl.classList.add('active');
+    el.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+    await playTone(freq, noteDur, ctx);
+  }
+
+  clearHighlights();
+  playing = false;
+  stopRequested = false;
+  document.getElementById('playBtn').disabled = false;
+}
+
+document.getElementById('playBtn').addEventListener('click', playSong);
+document.getElementById('stopBtn').addEventListener('click', () => {
+  stopRequested = true;
+  playing = false;
+  clearHighlights();
+  document.getElementById('playBtn').disabled = false;
+});
+
+const tempoSlider = document.getElementById('tempo');
+const tempoVal = document.getElementById('tempoVal');
+tempoSlider.addEventListener('input', () => tempoVal.textContent = tempoSlider.value + ' BPM');
+</script>
+</body>
+</html>
